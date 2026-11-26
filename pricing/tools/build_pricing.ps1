@@ -8,6 +8,7 @@ $inv = [System.Globalization.CultureInfo]::InvariantCulture
 
 function Q([object]$s) { '"' + ([string]$s -replace '"', '""') + '"' }
 function R0([double]$x) { [int][math]::Round($x, 0, [MidpointRounding]::AwayFromZero) }
+function R1([double]$x) { [math]::Round($x, 1, [MidpointRounding]::AwayFromZero).ToString('0.0', $inv) }
 function R2([double]$x) { [math]::Round($x, 2, [MidpointRounding]::AwayFromZero).ToString('0.00', $inv) }
 function N0([double]$x) { $x.ToString('N0', $inv) }
 function N1([double]$x) { $x.ToString('N1', $inv) }
@@ -16,9 +17,11 @@ function Write-Csv([string]$name, [object[]]$rows) {
     $lines = foreach ($r in $rows) { (($r | ForEach-Object { Q $_ }) -join ',') }
     $path = Join-Path $OutDir $name
     [System.IO.File]::WriteAllText($path, (($lines -join "`r`n") + "`r`n"), [System.Text.UTF8Encoding]::new($true))
+    $Tables[$name] = $rows
     Write-Host ("已生成 " + $name + "（" + $rows.Count + " 行）")
 }
 function New-Rows { return ,([System.Collections.Generic.List[object]]::new()) }
+$Tables = @{}   # 各表的行数据，供生成 Excel 工作簿与 Markdown 版复用
 
 # ---------------------------------------------------------------- 口径参数（教学假设，见 README 假设清单）
 $coef = 1.55        # 综合成本系数
@@ -98,7 +101,8 @@ $pIn = 1.08; $pOut = 4.32          # DeepSeek Flash 离峰价（元 / 百万 Tok
 $steps = 1; $retry = 0.05; $cacheHit = 0
 $perCall = $inTok * $pIn / 1e6 + $outTok * $pOut / 1e6
 $perReq = $perCall * $steps * (1 + $retry)
-$daily = 1.33                      # 月 40 份报告 ÷ 30 天
+$ordersPerMonth = 40                # 月核对报告量（假设，与 ROI 一致）
+$daily = $ordersPerMonth / 30       # 日均请求数
 $levels = @(
     @{ name = '保守'; f = 0.7 }
     @{ name = '基准'; f = 1.0 }
@@ -151,11 +155,14 @@ $schemeCYear = $tokBaseYear * $mixShare
 # ---------------------------------------------------------------- ROI（客户侧）
 $people = 6; $monthSalary = 8000
 $annualCostPP = $monthSalary * 12 * 1.4
-$ordersPerMonth = 40; $roundsSaved = 1; $minutesPerRound = 15
-$hoursSavedMonth = $ordersPerMonth * $roundsSaved * $minutesPerRound / 60
+$hourCost = $annualCostPP / 2000             # 综合时薪（元 / 小时）
+$hoursPerOrder = 2.5                         # 每单协调工时（变更前，销售 / 计划 / 客服 / 工厂合计，假设）
+$hoursCut = 0.6                              # 上线后协调工时压降比例（假设）
+$hoursSavedMonth = $ordersPerMonth * $hoursPerOrder * $hoursCut
 $saveRatio = $hoursSavedMonth / ($people * 2000 / 12)
+$fteSaved = $hoursSavedMonth / (2000 / 12)
 $conv = 0.5
-$gainLabor = $people * $annualCostPP * $saveRatio * $conv
+$gainLabor = $hoursSavedMonth * 12 * $hourCost * $conv
 $errCount = 12; $errLoss = 20000; $errCut = 0.5
 $gainErr = $errCount * $errLoss * $errCut
 $benefit = $gainLabor + $gainErr
@@ -166,6 +173,7 @@ function Get-Roi([double]$b) {
         roi1 = ($b - $firstTotal) / $firstTotal
         payback = $firstTotal / ($b / 12)
         three = (3 * $b - ($I1 + 3 * $runCost)) / ($I1 + 3 * $runCost)
+        ratio = $b / $runCost
         netMonth = ($b - $runCost) / 12
         paybackCurve = $(if ($b - $runCost -gt 0) { $I1 / (($b - $runCost) / 12) } else { [double]::NaN })
     }
@@ -174,6 +182,11 @@ $roiBase = Get-Roi $benefit
 $roiLow = Get-Roi ($benefit * 0.7)
 $roiHigh = Get-Roi ($benefit * 1.3)
 $roiLaborOnly = Get-Roi $gainLabor
+# 首年回本的前提：只靠工时、或只靠避免冲突，各需要多大的量
+$beHours = $firstTotal / 12 / ($hourCost * $conv)
+$beOrders = $beHours / ($hoursPerOrder * $hoursCut)
+$beLoss = $firstTotal / ($errCount * $errCut)
+$beCount = $firstTotal / ($errLoss * $errCut)
 function Pct([double]$x) { ($x * 100).ToString('0.0', $inv) + '%' }
 function Mon([double]$x) { if ([double]::IsNaN($x)) { '不回本' } else { $x.ToString('0.0', $inv) } }
 
@@ -282,11 +295,17 @@ $rows.Add(@('类别', '项目', '计算式', '数值', '单位', '数据来源�
 $rows.Add(@('投入', '一次性投入（实施费）', '06 报价汇总表', $I1, '元', '报价单总价'))
 $rows.Add(@('投入', '年运行成本（年服务费）', '06 报价汇总表', $runCost, '元/年', '含运维与模型用量包'))
 $rows.Add(@('投入', '首年总投入', '一次性投入 + 年运行成本', $firstTotal, '元', ''))
-$rows.Add(@('收益 1 人力节省', '每月节省工时', '40 单 × 每单少 1 轮追问 × 15 分钟', (R2 $hoursSavedMonth), '小时/月', '假设：每单少 1 轮、每轮 15 分钟；案例仅有“同单追问 ≥2 轮”的陈述，无耗时数据'))
-$rows.Add(@('收益 1 人力节省', '节省工时比例', '每月节省工时 ÷（6 人 × 2000 小时/年 ÷ 12）', ($saveRatio * 100).ToString('0.0', $inv), '%', '受影响 6 人为假设'))
-$rows.Add(@('收益 1 人力节省', '人力节省收益（已乘转化系数 0.5）', ('6 人 × ' + (N0 $annualCostPP) + ' 元 × ' + ($saveRatio * 100).ToString('0.0', $inv) + '% × 0.5'), (R0 $gainLabor), '元/年', '人均年综合成本 = 月薪 8,000 × 12 × 1.4（假设）；用等效人力口径，不等于裁人'))
+$rows.Add(@('收益 1 协调工时', '每单协调工时（变更前）', '销售 0.75 + 计划 1.0 + 客服 0.5 + 工厂 0.25 小时', $hoursPerOrder, '小时/单', '假设：访谈有“反复向计划、客服、工厂确认”“同单至少追问两轮”“最花时间是判断版本与核对产能”的陈述，但没有逐环节耗时记录'))
+$rows.Add(@('收益 1 协调工时', '工时压降比例', '核对由助手完成后，人工只做复核', ($hoursCut * 100), '%', '假设：试点期实测后更新'))
+$rows.Add(@('收益 1 协调工时', '每月节省工时', ($ordersPerMonth.ToString() + ' 单 × ' + $hoursPerOrder + ' 小时 × ' + ($hoursCut * 100).ToString('0', $inv) + '%'), (R2 $hoursSavedMonth), '小时/月', ('约合 ' + $fteSaved.ToString('0.00', $inv) + ' 个全职人力')))
+$rows.Add(@('收益 1 协调工时', '节省工时占比', '每月节省工时 ÷（6 人 × 2000 小时/年 ÷ 12）', ($saveRatio * 100).ToString('0.0', $inv), '%', '受影响 6 人为假设'))
+$rows.Add(@('收益 1 协调工时', '综合时薪', '月薪 8,000 × 12 × 1.4 ÷ 2000', (R2 $hourCost), '元/小时', '月薪为假设；用综合成本，不用月薪'))
+$rows.Add(@('收益 1 协调工时', '协调工时收益（已乘转化系数 0.5）', '每月节省工时 × 12 × 综合时薪 × 0.5', (R0 $gainLabor), '元/年', '等效人力口径，不等于裁人'))
 $rows.Add(@('收益 2 产能与时效', 'ERP 录入延迟、缺口显式化', '不折钱', 0, '元/年', '35 分钟延迟与 100 件缺口有访谈依据，但量化不成金额，只写时效改善'))
-$rows.Add(@('收益 3 差错与风险减少', '版本冲突损失减少', '12 次/年 × 20,000 元 × 50%', (R0 $gainErr), '元/年', '假设：年冲突 12 次、单次损失 2 万元、降低 50%。案例无历史差错数据，签约前须向客户索取并重算'))
+$rows.Add(@('收益 3 避免冲突', '年版本冲突次数', '现场按旧版做的事件', $errCount, '次/年', '假设：案例主题就是“客户改了订单，现场还在按旧版做”，但没有历史次数'))
+$rows.Add(@('收益 3 避免冲突', '单次冲突损失', '返工工时 + 材料报废 + 急单加班 + 客户补偿', $errLoss, '元/次', '假设：按 1,000 件级订单估，签约前须向客户索取返工与补偿记录'))
+$rows.Add(@('收益 3 避免冲突', '冲突降低比例', '版本、产能、质量三道核对后', ($errCut * 100), '%', '假设'))
+$rows.Add(@('收益 3 避免冲突', '避免损失收益', ('' + $errCount + ' 次/年 × ' + (N0 $errLoss) + ' 元 × ' + ($errCut * 100).ToString('0', $inv) + '%'), (R0 $gainErr), '元/年', '年收益的大头，也是最需要客户数据坐实的一项'))
 $rows.Add(@('收益 4 收入增量', '不计', '—', 0, '元/年', '无法验证，不计入'))
 $rows.Add(@('结果', '年收益合计（基准）', '人力节省 + 差错减少', (R0 $benefit), '元/年', ''))
 $rows.Add(@('结果', '年净收益', '年收益 − 年运行成本', (R0 ($benefit - $runCost)), '元/年', ''))
@@ -294,13 +313,19 @@ $rows.Add(@('结果', '首年 ROI', '(年收益 − 首年总投入) ÷ 首年�
 $rows.Add(@('结果', '回本周期（课程公式）', '首年总投入 ÷（年收益 ÷ 12）', (Mon $roiBase.payback), '月', '按年收益（未扣运行成本）摊回'))
 $rows.Add(@('结果', '回本点（净现金流口径）', '一次性投入 ÷ 月净收益', (Mon $roiBase.paybackCurve), '月', '回本曲线穿过 0 的月份，比课程公式晚约 2 个月'))
 $rows.Add(@('结果', '三年 ROI', '(3 年收益 − 3 年总成本) ÷ 3 年总成本', (Pct $roiBase.three), '', ''))
+$rows.Add(@('结果', '续年投入产出比', '年收益 ÷ 年运行成本', ($roiBase.ratio.ToString('0.0', $inv) + ' 倍'), '', '首年之后每年只付年服务费，这是客户每年实际看到的账'))
 $rows.Add(@('敏感性', '保守（收益 −30%）：首年 ROI / 回本 / 三年 ROI', '', ((Pct $roiLow.roi1) + ' / ' + (Mon $roiLow.payback) + ' 个月 / ' + (Pct $roiLow.three)), '', '回本为课程公式口径'))
 $rows.Add(@('敏感性', '基准：首年 ROI / 回本 / 三年 ROI', '', ((Pct $roiBase.roi1) + ' / ' + (Mon $roiBase.payback) + ' 个月 / ' + (Pct $roiBase.three)), '', ''))
 $rows.Add(@('敏感性', '乐观（收益 +30%）：首年 ROI / 回本 / 三年 ROI', '', ((Pct $roiHigh.roi1) + ' / ' + (Mon $roiHigh.payback) + ' 个月 / ' + (Pct $roiHigh.three)), '', ''))
-$rows.Add(@('敏感性', '仅工时口径（不计差错减少）：年净收益', ('' + (R0 $gainLabor) + ' − ' + (N0 $runCost)), (R0 ($gainLabor - $runCost)), '元/年', '年净收益为负，不回本——与阶段 04 的结论一致'))
+$rows.Add(@('敏感性', '仅工时口径（不计避免冲突）：年净收益', ('' + (R0 $gainLabor) + ' − ' + (N0 $runCost)), (R0 ($gainLabor - $runCost)), '元/年', '年净收益为负、不回本——与阶段 04 的结论一致：只算工时撑不起这个报价'))
 foreach ($m in @(0, 6, 12, 18, 24, 30, 36)) {
     $rows.Add(@('回本曲线', ('第 ' + $m + ' 月末累计净现金流'), ('−' + (N0 $I1) + ' + ' + (N0 (R0 $roiBase.netMonth)) + ' × ' + $m), (R0 (-$I1 + $roiBase.netMonth * $m)), '元', '基准情景'))
 }
+$rows.Add(@('回本前提', '首年回本所需年收益', '首年总投入', $firstTotal, '元/年', '下面四行回答：要么业务量够大，要么冲突损失够大，二者有其一即可首年回本'))
+$rows.Add(@('回本前提', '仅靠工时：每月需节省工时', '首年回本所需年收益 ÷ 12 ÷（综合时薪 × 0.5）', (R0 $beHours), '小时/月', ('现假设 ' + (R0 $hoursSavedMonth) + ' 小时/月')))
+$rows.Add(@('回本前提', '仅靠工时：对应月单量', '每月需节省工时 ÷（每单协调工时 × 压降比例）', (R0 $beOrders), '单/月', ('现假设 ' + $ordersPerMonth + ' 单/月；客服日均 45 条咨询若多数是改单，真实单量可能远高于此，须抽样核实')))
+$rows.Add(@('回本前提', '仅靠避免冲突：对应单次冲突损失', '首年回本所需年收益 ÷（年冲突次数 × 降低比例）', (R0 $beLoss), '元/次', ('现假设 ' + (N0 $errLoss) + ' 元/次')))
+$rows.Add(@('回本前提', '仅靠避免冲突：对应年冲突次数', '首年回本所需年收益 ÷（单次冲突损失 × 降低比例）', (R1 $beCount), '次/年', ('现假设 ' + $errCount + ' 次/年')))
 Write-Csv '05-客户ROI一页纸.csv' $rows
 
 # ================================================================ 06 报价汇总表
@@ -337,6 +362,12 @@ Write-Host ('单次请求成本 ' + (R2 $perReq) + ' 元；Token 月/年（基�
 Write-Host ('首年成本 ' + (R2 $firstYearCost) + '；续年成本 ' + (R2 $renewCost))
 Write-Host ('实施费 ' + (N0 $implFee) + '；年服务费 ' + (N0 $serviceFee) + '；首年合计 ' + (N0 $firstYearQuote))
 Write-Host ('自建：显存 ' + (R2 $vramGb) + ' GB；年固定 ' + (R2 $fixedYearB) + '；三年 ' + (R2 $threeYearB) + '；盈亏平衡 ' + ($critTok / 1e8).ToString('0.0', $inv) + ' 亿 Token/月')
-Write-Host ('ROI：节省工时比例 ' + ($saveRatio * 100).ToString('0.00', $inv) + '%；人力节省 ' + (N0 $gainLabor) + '；差错减少 ' + (N0 $gainErr) + '；年收益 ' + (N0 $benefit))
-Write-Host ('ROI：首年 ' + (Pct $roiBase.roi1) + '；回本 ' + (Mon $roiBase.payback) + ' 个月（曲线 ' + (Mon $roiBase.paybackCurve) + '）；三年 ' + (Pct $roiBase.three))
+Write-Host ('ROI：每月节省 ' + (R2 $hoursSavedMonth) + ' 小时（' + $fteSaved.ToString('0.00', $inv) + ' 个全职，占 ' + ($saveRatio * 100).ToString('0.0', $inv) + '%）；协调工时 ' + (N0 $gainLabor) + '；避免冲突 ' + (N0 $gainErr) + '；年收益 ' + (N0 $benefit))
+Write-Host ('ROI：首年 ' + (Pct $roiBase.roi1) + '；回本 ' + (Mon $roiBase.payback) + ' 个月（曲线 ' + (Mon $roiBase.paybackCurve) + '）；三年 ' + (Pct $roiBase.three) + '；续年投入产出比 ' + $roiBase.ratio.ToString('0.0', $inv) + ' 倍')
 Write-Host ('保守 ' + (Pct $roiLow.roi1) + ' / ' + (Mon $roiLow.payback) + ' / ' + (Pct $roiLow.three) + '；乐观 ' + (Pct $roiHigh.roi1) + ' / ' + (Mon $roiHigh.payback) + ' / ' + (Pct $roiHigh.three))
+Write-Host ('回本前提：仅靠工时需 ' + (R0 $beOrders) + ' 单/月（现 ' + $ordersPerMonth + '）；仅靠避免冲突需 ' + (R0 $beLoss) + ' 元/次（现 ' + $errLoss + '）或 ' + (R1 $beCount) + ' 次/年（现 ' + $errCount + '）')
+
+# ---------------------------------------------------------------- Excel 工作簿 + Markdown 版
+$wbScript = Join-Path $PSScriptRoot 'build_workbook.ps1'
+if (Get-Module -ListAvailable ImportExcel) { . $wbScript }
+else { Write-Host '未安装 ImportExcel 模块，跳过 Excel 工作簿与 Markdown 版的生成' }
