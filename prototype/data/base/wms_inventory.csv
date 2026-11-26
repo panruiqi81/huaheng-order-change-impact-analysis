@@ -1,0 +1,2 @@
+order_id,sku,batch_id,available_qty,wms_hold_status,recorded_at
+O-202610-001,SKU-A1,B-16,200,released,2026-11-03T09:00:00

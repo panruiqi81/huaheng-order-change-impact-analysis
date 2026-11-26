@@ -1,0 +1,3 @@
+batch_id,hold_status,record_version,effective_at,recorded_at,signed_by
+B-16,released,2,2026-10-30T10:00:00,2026-10-30T10:05:00,许文静
+B-17,held,3,2026-11-02T14:00:00,2026-11-02T14:03:00,

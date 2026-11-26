@@ -1,0 +1,2 @@
+schedule_id,order_id,planned_version,qty,line_id,status,updated_at
+P17,O-202610-001,V2,1000,L1,released,2026-10-08T11:30:00
